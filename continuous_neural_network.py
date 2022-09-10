@@ -1,25 +1,25 @@
-from math import exp
+from math import tanh
 import random
 import numpy as np
 
 
-def sigmoid(x):
-    return 1 / (1 + exp(-x))
-
-
 class Neuron:
-    def __init__(self):
+    def __init__(self, bias):
+        self.bias = bias  # tuple of two floats; see update_activation
+
         self.axons = []  # each axon is a tuple of the form (receiving_neuron, weight)
 
-        self.activation = 0  # the current activation of this neuron
-        self.incoming_signals = []  # the list of signals sent by axons to this neuron
+        self.activation = 0  # the current activation of this neuron; can have any real number value
+        self.incoming_signals = []  # the list of signals sent by other neurons to this neuron via axons
 
     def register_input(self, input_signal):
         # input signal is of the form (axon_weight, sender_neuron_activation)
         self.incoming_signals.append(input_signal)
 
     def update_activation(self):
-        self.activation = sigmoid(sum(list(map(lambda sg: sg[0] * sg[1], self.incoming_signals))))
+        incoming = sum(list(map(lambda sg: sg[0] * sg[1], self.incoming_signals)))
+        self.activation = self.bias[0] + tanh(self.bias[1] + incoming)
+
         self.incoming_signals = []
 
     def add_axon(self, new_axon):
@@ -30,8 +30,8 @@ class Network:
     def __init__(self, n_input_neurons, n_output_neurons):
         self.n_input_neurons, self.n_output_neurons = n_input_neurons, n_output_neurons
 
-        self.input_neurons = [Neuron() for i in range(n_input_neurons)]
-        self.output_neurons = [Neuron() for i in range(n_output_neurons)]
+        self.input_neurons = [Neuron((0, 0)) for i in range(n_input_neurons)]
+        self.output_neurons = [Neuron((0, 0)) for i in range(n_output_neurons)]
 
         self.middle_neurons = []
 
@@ -75,7 +75,7 @@ class Network:
                 s += ' ' + str(indexes[receiving_neuron]) + '|' + str(weight)
 
         for (i, neuron) in enumerate(self.middle_neurons):
-            s += f'\n{i+self.n_input_neurons}> {neuron.activation}'
+            s += f'\n{i+self.n_input_neurons}> {neuron.activation} {neuron.bias[0]} {neuron.bias[1]}'
             for receiving_neuron, weight in neuron.axons:
                 s += ' ' + str(indexes[receiving_neuron]) + '|' + str(weight)
 
@@ -85,9 +85,10 @@ class Network:
         with open(filename, 'w') as file:
             file.write(self.__str__())
 
-    def add_neuron(self):
-        nrn = Neuron()
-        nrn.activation = sigmoid(random.normalvariate(0, 3))
+    def add_neuron(self):  # randomly generate a neuron and add it to self
+        bias = (random.normalvariate(0, 0.5), random.normalvariate(0, 0.5))
+        nrn = Neuron(bias)
+        nrn.activation = tanh(random.normalvariate(0, 3))
         self.middle_neurons.append(nrn)
 
     def add_random_axon(self):
@@ -129,13 +130,16 @@ def read_network_from_lines(lines: iter):
             _, *axons_spec_raw = line.split()
             # read the axons coming out of this neuron
             activation = 0  # activation of input neuron need not be read; it will be given as input to the neural net
+            bias = (0, 0)  # same applies to bias
         else:  # if reading a middle neuron
-            _, activation, *axons_spec_raw = line.split()
+            _, activation, bias0, bias1, *axons_spec_raw = line.split()
             activation = float(activation)
-            # read the activation of this middle neuron as well as the axons coming out of it
+            bias = (float(bias0), float(bias1))
+            # read the activation and bias of this middle neuron as well as the axons coming out of it
         axons_spec = [(int(p[0]), float(p[1])) for p in list(map(lambda s: s.split('|'), axons_spec_raw))]
 
         sender_neuron.activation = activation
+        sender_neuron.bias = bias
 
         for (j, weight) in axons_spec:
             receiving_neuron = get_neuron_by_index(j)

@@ -7,6 +7,8 @@ import continuous_neural_network as nnet  # another file in this project
 
 
 NumberOfScentMarkers = 3  # the number of scent markers ants can use
+AntsSpeed = 3             # maximum distance the ant can move in one time step
+AntsAngularSpeed = pi/3   # maximum angle the ant can turn by in one time step
 
 
 def hex_color_format(r, g, b):
@@ -25,12 +27,10 @@ def dot(u, v):
     return out
 
 
-def signed_step(x):
-    if x <= -1:
-        return -1
-    elif x >= 1:
+def step_function(x):
+    if x >= 1:
         return 1
-    else:  # -1 < x < 1
+    else:
         return 0
 
 
@@ -42,9 +42,6 @@ class AntsParameters:
 
         self.marker_decay_coefficients = decay_coefficients  # the rate of decay of various scent markers
         self.nw = neural_net
-
-        self.speed = 3  # maximum distance the ant can move in one time step
-        self.angular_speed = pi/4  # maximum angle the ant can turn by in one time step
 
         self.food_cost = 0  # how much food it costs to produce an ant
         self.calculate_food_cost()
@@ -61,8 +58,9 @@ def read_ants_parameters_from_file(filename):
         assert len(decay_coefs) == NumberOfScentMarkers
 
         nw = nnet.read_network_from_lines(lines)
-        assert nw.n_input_neurons == (2 + 3*NumberOfScentMarkers)
-        # 3 neurons per scent type, 1 neuron for random number generator (gaussian), 1 neuron for bias (activation = 1)
+        assert nw.n_input_neurons == (4 + 3*NumberOfScentMarkers)
+        # 3 neurons per scent type, 1 neuron for random number generator (gaussian),
+        # 2 neurons for food, 1 neuron for "bumping into wall"
         assert nw.n_output_neurons == (2 + NumberOfScentMarkers)
         # 1 neuron per scent type, 1 neuron for "forward", 1 neuron for "turn left"
 
@@ -78,8 +76,11 @@ class Ant:
         self.position = position  # tuple of the form (x, y), where x and y are NOT necessarily integers
         self.orientation = orientation  # rotation clockwise from x-axis, measured in radians
 
-        self.carrying_food = False  # whether the ant currently has food in its jaws
+        self.is_carrying_food = False  # whether the ant currently has food in its jaws
         # that it is supposed to transport to the mother colony
+        self.was_carrying_food = False  # whether ant was carrying food one time step ago
+
+        self.is_bumping_into_wall = False  # gets set to True if the ant tries to move outside the field
 
         self.forward = self.left = (0, 0)
         self.update_unit_vectors()
@@ -106,24 +107,34 @@ class Ant:
                     pixels[x, y] = (255, 255, 255)
 
     def update(self, scent_input):  # move ant to new position, return amount of each scent marker deposited
-        nw_input = [1, random.normalvariate(0, 1)]  # first bias neuron, then random number generator neuron
+        just_picked_up_food = just_dropped_off_food = False
+        if self.is_carrying_food and not self.was_carrying_food:
+            just_picked_up_food = True
+        if self.was_carrying_food and not self.is_carrying_food:
+            just_dropped_off_food = True
+        self.was_carrying_food = self.is_carrying_food
+
+        nnet_input = [
+                    random.normalvariate(0, 1),        # random number generator input
+                    int(just_picked_up_food),     # if ant has just picked up foo
+                    int(just_dropped_off_food),   # if ant has just dropped off food
+                    int(self.is_bumping_into_wall)     # "bumping into wall" input
+                    ]
         for (value, d_x, d_y) in scent_input:
             d_f = dot((d_x, d_y), self.forward)
             d_l = dot((d_x, d_y), self.left)
 
-            nw_input.append(value)  # the value of this scent at ant's position
-            nw_input.append(d_f)  # the gradient of this scent along the frontal axis
-            nw_input.append(d_l)  # the gradient of this scent along the side axis
+            nnet_input.append(value)  # the value of this scent at ant's position
+            nnet_input.append(d_f)    # the gradient of this scent along the frontal axis
+            nnet_input.append(d_l)    # the gradient of this scent along the side axis
 
-        nw_output = self.nw.update(nw_input)
-        desire_forward, desire_turn = nw_output[0], nw_output[1]  # desire to move forward and turn
-        dl = self.parameters.speed * signed_step(desire_forward / 0.5)
-        dth = self.parameters.angular_speed * min(max(2*(desire_turn - 0.5), -1), 1)
-        # signed_step(x) is -1 if x <= -1, 0 if -1 < x < 1, 1 if 1 <= x
-        # tanh is the hyperbolic tangent; it is also between -1 and 1, but it is continuous
+        nnet_output = self.nw.update(nnet_input)
+        desire_forward, desire_turn = nnet_output[0], nnet_output[1]  # desire to move forward and to turn
+        dl = AntsSpeed * step_function(desire_forward / 0.5)
+        dth = AntsAngularSpeed * min(max(desire_turn, -1), 1)
 
-        scent_output = list(map(lambda x: max(2*(x-0.5), 0), nw_output[2:]))
-        # the amount of scent deposited
+        scent_output = list(map(lambda x: max(x, 0), nnet_output[2:]))
+        # the amount of scent of each type deposited
 
         self.position[0] += self.forward[0] * dl
         self.position[1] += self.forward[1] * dl
@@ -262,12 +273,18 @@ class Simulation:
         # and account for the scent markers it decides to place in this iteration.
         # also, see if ants brought food to the colony
         for ant in self.ants:
-            # if ant went outside the field, bring it back
-            ant.position[0] = min(max(ant.position[0], 0), self.field.xsize - 1)
-            ant.position[1] = min(max(ant.position[1], 0), self.field.ysize - 1)
+            # if ant went outside the field, bring it back and let it know what happened
+            if (not 0 <= ant.position[0] <= self.field.xsize - 1):
+                ant.position[0] = min(max(ant.position[0], 0), self.field.xsize - 1)
+                ant.is_bumping_into_wall = True
+            elif (not 0 <= ant.position[1] <= self.field.ysize - 1):
+                ant.position[1] = min(max(ant.position[1], 0), self.field.ysize - 1)
+                ant.is_bumping_into_wall = True
+            else:
+                ant.is_bumping_into_wall = False
 
-            if ant.carrying_food and self.colony.is_inside(ant.position):
-                ant.carrying_food = False
+            if ant.is_carrying_food and self.colony.is_inside(ant.position):
+                ant.is_carrying_food = False
                 self.colony.receive_one_unit_of_food()
 
             scent_input = self.field.get_scent_at(ant.position)  # compute what the ant smells
@@ -297,13 +314,13 @@ def main():
     ants_parameters = read_ants_parameters_from_file('ants_params.txt')
     s = Simulation(ants_parameters, xsize, ysize)
 
-    for i in range(10):
+    for i in range(40):
         s.colony.produce_ant()
 
     img = Image.new('RGB', (xsize, ysize))
     s.display(img)
     images.append(img)
-    for i in range(30):
+    for i in range(300):
         print(i)
         s.update()
 
